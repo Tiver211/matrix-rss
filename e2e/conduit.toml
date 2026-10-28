@@ -1,0 +1,13 @@
+[global]
+server_name = "localhost"
+database_backend = "rocksdb"
+database_path = "/var/lib/matrix-conduit"
+address = "0.0.0.0"
+port = 6167
+allow_registration = true
+registration_token = "testtoken"
+allow_federation = false
+allow_encryption = true
+allow_check_for_updates = false
+max_request_size = 20000000
+trusted_servers = []
