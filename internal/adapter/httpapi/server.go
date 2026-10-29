@@ -29,6 +29,20 @@ type MessageReader interface {
 	Revisions(ctx context.Context, roomID, eventID string) ([]domain.Revision, error)
 }
 
+// MediaReader hands out the files of attachments.
+type MediaReader interface {
+	Serves(attachment *domain.Attachment) bool
+	Open(ctx context.Context, roomID, eventID string) (domain.Message, []byte, error)
+}
+
+// noMedia is used when files are not served.
+type noMedia struct{}
+
+func (noMedia) Serves(*domain.Attachment) bool { return false }
+func (noMedia) Open(context.Context, string, string) (domain.Message, []byte, error) {
+	return domain.Message{}, nil, domain.ErrMediaUnavailable
+}
+
 // Access checks and manages the credentials: feed tokens and API keys.
 type Access interface {
 	FeedByToken(ctx context.Context, secret string) (domain.Feed, error)
@@ -47,6 +61,7 @@ type Deps struct {
 	Feeds    FeedLister
 	History  HistoryReader
 	Messages MessageReader
+	Media    MediaReader
 	Access   Access
 }
 
@@ -73,15 +88,20 @@ type handler struct {
 
 // New builds the HTTP handler with all routes.
 func New(deps Deps, cfg Config, log *slog.Logger) http.Handler {
+	if deps.Media == nil {
+		deps.Media = noMedia{}
+	}
 	h := &handler{Deps: deps, cfg: cfg, log: log}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("GET /feeds/{token}", h.feed)
+	mux.HandleFunc("GET /feeds/{token}/media/{eventID}", h.feedMedia)
 
 	mux.Handle("GET /api/v1/rooms", h.authenticated(h.listRooms))
 	mux.Handle("GET /api/v1/rooms/{roomID}/messages", h.authenticated(h.listMessages))
 	mux.Handle("GET /api/v1/rooms/{roomID}/messages/{eventID}/history", h.authenticated(h.messageHistory))
+	mux.Handle("GET /api/v1/rooms/{roomID}/messages/{eventID}/media", h.authenticated(h.apiMedia))
 
 	mux.Handle("GET /api/v1/admin/keys", h.adminOnly(h.listKeys))
 	mux.Handle("POST /api/v1/admin/keys", h.adminOnly(h.createKey))
@@ -119,6 +139,10 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, domain.ErrFeedNotFound), errors.Is(err, domain.ErrMessageNotFound), errors.Is(err, domain.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, domain.ErrMediaUnavailable):
+		writeError(w, http.StatusNotFound, "media not available")
+	case errors.Is(err, domain.ErrMediaTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "media too large")
 	case errors.Is(err, domain.ErrInvalid):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:

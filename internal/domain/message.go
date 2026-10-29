@@ -18,11 +18,33 @@ const (
 	KindVideo  MessageKind = "video"
 	KindAudio  MessageKind = "audio"
 	KindFile   MessageKind = "file"
+	// KindSticker, KindLocation and KindPoll are events other than plain chat messages.
+	KindSticker  MessageKind = "sticker"
+	KindLocation MessageKind = "location"
+	KindPoll     MessageKind = "poll"
+	// KindOther is a message of a type the bot does not know; its text is kept.
+	KindOther MessageKind = "other"
 	// KindRedacted marks a message that was already deleted when the bot first saw it, so its type is unknown.
 	KindRedacted MessageKind = "redacted"
 )
 
-// Message is a single chat message. Body and MediaURL always hold the current version.
+// Attachment describes the file of an image, video, audio, voice message, file or sticker.
+type Attachment struct {
+	// Name is the file name.
+	Name     string
+	MIMEType string
+	// Size is in bytes, 0 if unknown.
+	Size          int64
+	Width, Height int
+	Duration      time.Duration
+	// Voice marks a voice message.
+	Voice bool
+	// Ref is an opaque reference that the media source resolves to the file, including the keys of an
+	// encrypted one. It is empty when the file cannot be fetched.
+	Ref string
+}
+
+// Message is a single chat message. Body and Formatted always hold the current version.
 type Message struct {
 	// Seq is a local, unique row number.
 	Seq        uint64
@@ -31,8 +53,16 @@ type Message struct {
 	Sender     string
 	SenderName string
 	Kind       MessageKind
-	Body       string
-	MediaURL   string
+	// Body is the plain text, or the caption or file name of an attachment.
+	Body string
+	// Formatted is the text as sanitized HTML; empty for plain messages.
+	Formatted  string
+	Attachment *Attachment
+	// Location is the geo: URI of a location message.
+	Location string
+	// ReplyTo is the event this message answers; ThreadRoot the first message of its thread.
+	ReplyTo    string
+	ThreadRoot string
 	SentAt     time.Time
 	// EditedAt is set when the message was edited; the previous versions are available as revisions.
 	EditedAt *time.Time
@@ -54,6 +84,7 @@ type Edit struct {
 	RoomID        string
 	Sender        string
 	Body          string
+	Formatted     string
 	At            time.Time
 }
 

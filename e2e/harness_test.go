@@ -122,6 +122,23 @@ func (u *user) mark() int {
 func (u *user) waitFrom(mark int, room id.RoomID, substr string) string {
 	u.t.Helper()
 	var found string
+	defer func() {
+		if u.t.Failed() {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			for _, m := range u.msgs[mark:] {
+				where := "elsewhere"
+				if m.room == room {
+					where = "in the room"
+				}
+				body := m.body
+				if len(body) > 90 {
+					body = body[:90] + "..."
+				}
+				u.t.Logf("  %s saw %s: %s: %q", u.name, where, m.sender, body)
+			}
+		}
+	}()
 	eventually(u.t, fmt.Sprintf("%s to receive %q in %s", u.name, substr, room), 20*time.Second, func() bool {
 		u.mu.Lock()
 		defer u.mu.Unlock()

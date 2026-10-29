@@ -87,7 +87,7 @@ func (r *MessageRepository) SaveEdit(ctx context.Context, edit domain.Edit) erro
 		// The newest edit wins, whatever order the edits arrive in.
 		return tx.Model(&messageModel{}).
 			Where("seq = ? AND (edited_at IS NULL OR edited_at <= ?)", original.Seq, edit.At).
-			Updates(map[string]any{"body": edit.Body, "edited_at": edit.At}).Error
+			Updates(map[string]any{"body": edit.Body, "formatted": edit.Formatted, "edited_at": edit.At}).Error
 	})
 }
 
@@ -119,7 +119,8 @@ func (r *MessageRepository) MarkDeleted(ctx context.Context, roomID, eventID str
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		changes := map[string]any{"deleted_at": deletion.At, "deleted_by": deletion.By, "delete_reason": deletion.Reason}
 		if wipeContent {
-			changes["body"], changes["media_url"] = "", ""
+			changes["body"], changes["formatted"], changes["location"] = "", "", ""
+			changes["attachment"] = nil
 		}
 		result := tx.Model(&messageModel{}).
 			Where("room_id = ? AND event_id = ? AND deleted_at IS NULL", roomID, eventID).

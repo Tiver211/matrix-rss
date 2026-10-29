@@ -11,6 +11,10 @@ var (
 	ErrCredentialNotFound = errors.New("credential not found")
 	// ErrInvalidCredentials is returned when a secret is unknown, revoked or expired.
 	ErrInvalidCredentials = errors.New("invalid credentials")
+	// ErrMediaUnavailable is returned when a message has no file or the homeserver no longer has it.
+	ErrMediaUnavailable = errors.New("media not available")
+	// ErrMediaTooLarge is returned when a file is bigger than the configured limit.
+	ErrMediaTooLarge = errors.New("media too large")
 	// ErrInvalid marks a rejected request; the wrapping error says why.
 	ErrInvalid = errors.New("invalid request")
 )

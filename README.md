@@ -75,6 +75,26 @@ The database is a cache in front of the Matrix homeserver.
 - **Not fetched**: feeds (`/feeds/{token}`) and the CLI use the database only. Disabled rooms are never fetched. `deleted=only` does not trigger a fetch. Set `HISTORY_BACKFILL=false` to turn fetching off.
 - **Limits**: only gaps *before the oldest stored message* are filled; a hole in the middle (for example messages missed while the bot was down for long) stays. Messages the bot has no keys for in encrypted rooms are skipped, and at most 5 homeserver requests of 100 events are made per API call. An edit is applied only if its original is stored or fetched in the same call.
 
+## Kinds of messages
+
+Every kind of message works in plain and in encrypted rooms alike.
+
+| `kind` | What it is | Stored |
+| --- | --- | --- |
+| `text`, `notice`, `emote` | text; formatted text is kept as sanitized HTML | `body`, `formatted_body` |
+| `image`, `video`, `audio`, `file` | attachments, voice messages are `audio` with `voice: true` | `body` (caption or name), `attachment` |
+| `sticker` | a sticker | `attachment` |
+| `location` | a shared place | `location.geo_uri` and a map link |
+| `poll` | a poll start, as the question and numbered answers; votes and results are not tracked | `body` |
+| `other` | a message type the bot does not know, with its text | `body` |
+| `redacted` | a message that was already deleted when the bot first saw it | nothing |
+
+Replies and threads are kept as `reply_to` and `thread_root` (event IDs); the quoted fallback text of old clients is removed from the reply. Reactions, votes, typing, read receipts and state changes are not messages and are not recorded.
+
+**Formatted text** goes through an allow-list (the tags the Matrix specification recommends; no scripts, styles, images or `javascript:` links) before it is stored, so it is safe to show in a feed reader or a page.
+
+**Attachments** are not copied to the bot's disk. On every download the bot fetches the file from the homeserver, decrypts it if the room is encrypted, checks its size against `MEDIA_MAX_SIZE` and streams it to the reader. So a deleted message, or a file the homeserver purged, is gone for readers too, and the bot stores no decrypted files. `attachment` describes the file (name, `mime_type`, `size`, `width`, `height`, `duration_ms`, `voice`) and has a `url` when the bot can serve it (not above the size limit, not turned off). Downloads accept `Range` requests and `ETag`. Pictures, audio and video are shown in place; everything else, SVG included, is sent as a download, always with `nosniff` and a sandbox policy, because the files come from other people.
+
 ## Edits and deletions
 
 - **Edits** keep every version. The message holds the current text and `edited_at`; `GET .../messages/{eventID}/history` lists all versions, oldest first (the first is the original). Only the author's edits count, the newest edit wins.
@@ -89,7 +109,7 @@ No headers needed; the 256-bit random feed token in the URL is the credential. U
 - `format=rss` (default, `application/rss+xml`), `atom`, or `json` (JSON Feed).
 - `limit=N`: newest N messages, default 50, max 200.
 - One item per message, newest first, deleted messages left out; an edited message shows its current text. `title` = `Sender: first line of the text` (cut at 80 characters), `description` = the full text (plus the media URL on a new line for attachments), `guid` = Matrix event ID, `pubDate` = send time (UTC), `author` = display name, `link` = `https://matrix.to/#/{room}/{event}` permalink.
-- Text is plain: HTML from Matrix is not forwarded.
+- The title of non-text items starts with a label: `[image]`, `[video]`, `[audio]`, `[voice message]`, `[file]`, `[sticker]`, `[location]`, `[poll]`. `description` is the plain text; a formatted message also has the sanitized HTML as `content:encoded`. Items with a file have an `<enclosure>` (type and size included) that points to `/feeds/{token}/media/{eventID}`: the same token downloads the file. Locations add the `geo:` URI and an OpenStreetMap link to the description.
 - Caching: `ETag` and `Cache-Control: private, max-age=60`; send `If-None-Match` to get an empty `304` for an unchanged feed.
 
 ### API: `Authorization: Bearer <root token or API key>`
@@ -106,8 +126,9 @@ Missing, wrong, revoked or expired credentials give `401`. An API key used on a 
    "next_before":"1793178120000-3"}
   ```
 
-  Newest first by send time. `kind` is `text|notice|emote|image|video|audio|file|redacted`; `media_url` appears for unencrypted attachments; `edited_at` for edited messages; `deleted: {at, by, reason}` for deleted ones (with `deleted=include|only`). `limit` defaults to 50 (max 200). `next_before` is an opaque cursor: pass it as `before` to get the next, older page, and stop when `messages` is empty. A room that never had a feed gives `404`; a disabled room stays readable (from the database). `seq` is only a local row number, not an order.
+  Newest first by send time. `kind` is one of the kinds above; `attachment`, `location`, `formatted_body`, `reply_to` and `thread_root` appear when they apply; `edited_at` for edited messages; `deleted: {at, by, reason}` for deleted ones (with `deleted=include|only`). `limit` defaults to 50 (max 200). `next_before` is an opaque cursor: pass it as `before` to get the next, older page, and stop when `messages` is empty. A room that never had a feed gives `404`; a disabled room stays readable (from the database). `seq` is only a local row number, not an order.
 - `GET /api/v1/rooms/{roomID}/messages/{eventID}/history` → `{"event_id":"$3","revisions":[{"event_id","body","created_at"}]}`, oldest first. A message that was never edited has one revision. `404` for an unknown message.
+- `GET /api/v1/rooms/{roomID}/messages/{eventID}/media` → the file of the message (the `attachment.url` of the listing). `404` for a message without a file, a deleted one, or a file the homeserver no longer has; `413` above `MEDIA_MAX_SIZE`; a key limited to other rooms gets `403`.
 - `GET /healthz` → `200 ok`, no auth.
 
 ### Admin API: root token only (API keys get `403`)
@@ -146,6 +167,8 @@ Run with `docker run --env-file .env -v matrixrss-data:/data -p 8080:8080 matrix
 
 ## Notes
 
-- Attachments are linked through the homeserver's `/_matrix/media/v3/download`; servers that require authenticated media will not serve them to feed readers. Encrypted attachments are not linked.
+- The bot downloads files with its own account (the authenticated media endpoint, with the older one as a fallback), so readers need no account on the homeserver. Each download holds the whole file in memory (at most `MEDIA_MAX_SIZE`), and at most 4 downloads run at once.
+- Commands older than 5 minutes are ignored. A bot that starts without its sync position is handed the recent history of its rooms, and old commands in it (a `!rss rotate`, say) must not run again.
+- Upgrading: messages stored by an earlier version keep their text but lose old media links (the column was replaced by the attachment description); `media_url` is no longer in the API.
 - In encrypted rooms the bot only reads messages whose keys other members' clients share with its device.
 - Fetching history from the homeserver was verified against a fake source and the database layer (SQLite and PostgreSQL), not yet against a real Matrix server.

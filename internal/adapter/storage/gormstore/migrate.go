@@ -17,7 +17,20 @@ func migrate(db *gorm.DB) error {
 	if err != nil {
 		return err
 	}
-	return migrateLegacyFeedTokens(db)
+	if err := migrateLegacyFeedTokens(db); err != nil {
+		return err
+	}
+	return dropLegacyMediaURL(db)
+}
+
+// dropLegacyMediaURL removes the column that held a plain download link before attachments were stored
+// with their metadata and a reference. The old links cannot be converted, and the column would
+// reject new rows because it cannot be empty.
+func dropLegacyMediaURL(db *gorm.DB) error {
+	if !db.Migrator().HasColumn("messages", "media_url") {
+		return nil
+	}
+	return db.Exec("ALTER TABLE messages DROP COLUMN media_url").Error
 }
 
 // migrateLegacyFeedTokens moves the plain token column of feeds, from the time a feed had a single

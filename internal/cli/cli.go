@@ -231,9 +231,19 @@ func formatMessage(msg domain.Message) string {
 	if name == "" {
 		name = msg.Sender
 	}
-	line := fmt.Sprintf("%s [%d] %s: %s", msg.SentAt.Local().Format(time.DateTime), msg.Seq, name, strings.ReplaceAll(msg.Body, "\n", "\n    "))
-	if msg.MediaURL != "" {
-		line += "\n    " + msg.MediaURL
+	label := ""
+	if msg.Kind != "" && msg.Kind != domain.KindText {
+		label = " (" + string(msg.Kind) + ")"
+	}
+	line := fmt.Sprintf("%s [%d] %s%s: %s", msg.SentAt.Local().Format(time.DateTime), msg.Seq, name, label, strings.ReplaceAll(msg.Body, "\n", "\n    "))
+	if a := msg.Attachment; a != nil {
+		line += fmt.Sprintf("\n    file: %s (%s, %d bytes)", a.Name, a.MIMEType, a.Size)
+	}
+	if msg.Location != "" {
+		line += "\n    location: " + msg.Location
+	}
+	if msg.ReplyTo != "" {
+		line += "\n    reply to: " + msg.ReplyTo
 	}
 	if msg.EditedAt != nil {
 		line += "  (edited " + msg.EditedAt.Local().Format(time.DateTime) + ")"

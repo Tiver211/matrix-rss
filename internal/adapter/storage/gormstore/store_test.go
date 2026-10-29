@@ -259,6 +259,77 @@ func TestMessageRepositoryOrdersChronologicallyAndPages(t *testing.T) {
 	}
 }
 
+func TestMessageRepositoryKeepsEveryKindOfContent(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestStore(t).Messages()
+	want := domain.Message{
+		EventID: "$v", RoomID: "!a:hs", Sender: "@u:hs", Kind: domain.KindAudio, Body: "voice.ogg", Formatted: "<em>hi</em>",
+		Attachment: &domain.Attachment{
+			Name: "voice.ogg", MIMEType: "audio/ogg", Size: 4096, Width: 640, Height: 480,
+			Duration: 12*time.Second + 340*time.Millisecond, Voice: true, Ref: `{"url":"mxc://hs/x"}`,
+		},
+		Location: "geo:52.5,13.4", ReplyTo: "$parent", ThreadRoot: "$root", SentAt: at(1),
+	}
+	if err := repo.Add(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	plain := domain.Message{EventID: "$p", RoomID: "!a:hs", Kind: domain.KindText, Body: "plain", SentAt: at(2)}
+	_ = repo.Add(ctx, plain)
+
+	got, err := repo.Get(ctx, "!a:hs", "$v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want.Seq = got.Seq
+	if *got.Attachment != *want.Attachment {
+		t.Fatalf("attachment: got %+v, want %+v", got.Attachment, want.Attachment)
+	}
+	got.Attachment, want.Attachment = nil, nil
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	if p, _ := repo.Get(ctx, "!a:hs", "$p"); p.Attachment != nil || p.Formatted != "" || p.Location != "" {
+		t.Fatalf("a plain message has none of the extras: %+v", p)
+	}
+}
+
+func TestEditReplacesTheFormattedText(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestStore(t).Messages()
+	_ = repo.Add(ctx, domain.Message{EventID: "$m", RoomID: "!a:hs", Sender: "@u:hs", Body: "v1", Formatted: "<b>v1</b>", SentAt: at(0)})
+	_ = repo.SaveEdit(ctx, domain.Edit{EventID: "$e", TargetEventID: "$m", RoomID: "!a:hs", Sender: "@u:hs", Body: "v2", At: at(1)})
+
+	msg, _ := repo.Get(ctx, "!a:hs", "$m")
+	if msg.Body != "v2" || msg.Formatted != "" {
+		t.Fatalf("an edit without formatting must drop the old formatting: %+v", msg)
+	}
+}
+
+func TestLegacyMediaURLColumnIsDropped(t *testing.T) {
+	driverName, dsn := testTarget(t)
+	store, err := Open(driverName, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An older version had a required media_url column.
+	if err := store.db.Exec("ALTER TABLE messages ADD COLUMN media_url TEXT NOT NULL DEFAULT ''").Error; err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	store, err = Open(driverName, dsn)
+	if err != nil {
+		t.Fatalf("open must migrate: %v", err)
+	}
+	defer store.Close()
+	if store.db.Migrator().HasColumn("messages", "media_url") {
+		t.Fatal("the legacy column must be dropped")
+	}
+	if err := store.Messages().Add(context.Background(), domain.Message{EventID: "$x", RoomID: "!a:hs", SentAt: at(1)}); err != nil {
+		t.Fatalf("new rows must be accepted: %v", err)
+	}
+}
+
 func TestMessageRepositoryEdits(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestStore(t).Messages()
@@ -293,7 +364,8 @@ func TestMessageRepositoryDeletions(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestStore(t).Messages()
 	for _, id := range []string{"$keep", "$wipe", "$live"} {
-		_ = repo.Add(ctx, domain.Message{EventID: id, RoomID: "!a:hs", Body: "text of " + id, MediaURL: "http://m", SentAt: at(1)})
+		_ = repo.Add(ctx, domain.Message{EventID: id, RoomID: "!a:hs", Body: "text of " + id, Formatted: "<b>x</b>", Location: "geo:1,2",
+			Attachment: &domain.Attachment{Name: "a.png", Ref: "ref"}, SentAt: at(1)})
 	}
 	_ = repo.SaveEdit(ctx, domain.Edit{EventID: "$e", TargetEventID: "$wipe", RoomID: "!a:hs", Body: "edited", At: at(2)})
 	deletion := domain.Deletion{At: at(9), By: "@mod:hs", Reason: "spam"}
@@ -309,11 +381,11 @@ func TestMessageRepositoryDeletions(t *testing.T) {
 	}
 
 	kept, _ := repo.Get(ctx, "!a:hs", "$keep")
-	if kept.Deletion == nil || kept.Deletion.By != "@mod:hs" || kept.Body != "text of $keep" {
+	if kept.Deletion == nil || kept.Deletion.By != "@mod:hs" || kept.Body != "text of $keep" || kept.Attachment == nil || kept.Attachment.Ref != "ref" {
 		t.Fatalf("content must survive: %+v", kept)
 	}
 	wiped, _ := repo.Get(ctx, "!a:hs", "$wipe")
-	if wiped.Deletion == nil || wiped.Body != "" || wiped.MediaURL != "" {
+	if wiped.Deletion == nil || wiped.Body != "" || wiped.Formatted != "" || wiped.Attachment != nil || wiped.Location != "" {
 		t.Fatalf("content must be erased: %+v", wiped)
 	}
 	if revisions, _ := repo.Revisions(ctx, "!a:hs", "$wipe"); len(revisions) != 0 {

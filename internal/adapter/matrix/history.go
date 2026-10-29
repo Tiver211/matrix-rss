@@ -14,7 +14,9 @@ import (
 
 // historyFilter limits the fetched history to what can hold messages; encrypted events are
 // decrypted afterwards.
-var historyFilter = &mautrix.FilterPart{Types: []event.Type{event.EventMessage, event.EventEncrypted}}
+var historyFilter = &mautrix.FilterPart{Types: append(
+	[]event.Type{event.EventMessage, event.EventSticker, event.EventEncrypted}, pollStartTypes...,
+)}
 
 // History reads room history from the homeserver. It implements usecase.HistorySource.
 type History struct {
@@ -45,7 +47,7 @@ func (h *History) Older(ctx context.Context, roomID string, from usecase.History
 		}
 		if edit, isEdit := toEdit(evt); isEdit {
 			page.Edits = append(page.Edits, edit)
-		} else if msg, isMessage := toMessage(evt, h.bot.displayName(ctx, evt), h.bot.mediaURL); isMessage {
+		} else if msg, isMessage := toMessage(evt, h.bot.displayName(ctx, evt)); isMessage {
 			page.Messages = append(page.Messages, msg)
 		}
 	}
@@ -74,7 +76,9 @@ func (h *History) usable(ctx context.Context, evt *event.Event) (*event.Event, b
 	if evt.Unsigned.RedactedBecause != nil {
 		return evt, true // the content is gone, nothing to parse or decrypt
 	}
-	if err := evt.Content.ParseRaw(evt.Type); err != nil && !errors.Is(err, event.ErrContentAlreadyParsed) {
+	// Event types the library does not know, such as polls, keep their raw content.
+	err := evt.Content.ParseRaw(evt.Type)
+	if err != nil && !errors.Is(err, event.ErrContentAlreadyParsed) && !errors.Is(err, event.ErrUnsupportedContentType) {
 		return nil, false
 	}
 	if evt.Type != event.EventEncrypted {

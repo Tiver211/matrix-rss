@@ -3,7 +3,7 @@
 Real Matrix clients, with end-to-end encryption, talk to a local [Conduit](https://conduit.rs) homeserver and a running bot.
 The tests carry the build tag `e2e`, so `go test ./...` skips them.
 
-What they cover: invitations (only bot admins), publishing, feed and API, edits and deletions, history fetched from the homeserver and paging, room admins and private chats, API keys and feed tokens (issue, scope, revoke), the CLI on the live database, encrypted rooms (commands, edits, deletions, history), and a restart of the bot.
+What they cover: every kind of message in plain and encrypted rooms (images, voice, video, files, stickers, locations, polls, replies, threads, formatted text; downloads decrypted byte for byte; size limit; deleted messages), invitations (only bot admins), publishing, feed and API, edits and deletions, history fetched from the homeserver and paging, room admins and private chats, API keys and feed tokens (issue, scope, revoke), the CLI on the live database, encrypted rooms (commands, edits, deletions, history), and a restart of the bot.
 
 ## Run
 
@@ -34,4 +34,4 @@ E2E_PHASE=down go test -tags 'goolm e2e' -count=1 -run TestDowntime ./e2e   # pe
 E2E_PHASE=up go test -tags 'goolm e2e' -count=1 -run TestAfterRestart ./e2e
 ```
 
-Delete `$E2E_DIR/bot` before a new `TestE2E` run; the scenarios expect an empty bot database. Stop the homeserver with `docker rm -f conduit-test`.
+The bot of these tests runs with `MEDIA_MAX_SIZE=1048576` (see `bot.env.example`). Delete `$E2E_DIR/bot` before a new `TestE2E` run; the scenarios expect an empty bot database. For reliable timing start from a clean homeserver too (`docker rm -f conduit-test`, run it again, `register.py`, and delete `$E2E_DIR/users`): after many runs the test users have hundreds of old rooms and their sync slows down. `E2E_ONLY=media` (or `plain`, `backfill`, `roomadmin`, `cli`, `e2ee`) runs a single scenario. Stop the homeserver with `docker rm -f conduit-test`.

@@ -14,17 +14,39 @@ type roomDTO struct {
 }
 
 type messageDTO struct {
-	Seq        uint64       `json:"seq"`
-	EventID    string       `json:"event_id"`
-	RoomID     string       `json:"room_id"`
-	Sender     string       `json:"sender"`
-	SenderName string       `json:"sender_name"`
-	Kind       string       `json:"kind"`
-	Body       string       `json:"body"`
-	MediaURL   string       `json:"media_url,omitempty"`
-	SentAt     time.Time    `json:"sent_at"`
-	EditedAt   *time.Time   `json:"edited_at,omitempty"`
-	Deleted    *deletionDTO `json:"deleted,omitempty"`
+	Seq        uint64 `json:"seq"`
+	EventID    string `json:"event_id"`
+	RoomID     string `json:"room_id"`
+	Sender     string `json:"sender"`
+	SenderName string `json:"sender_name"`
+	Kind       string `json:"kind"`
+	Body       string `json:"body"`
+	// FormattedBody is the sanitized HTML of a formatted message.
+	FormattedBody string         `json:"formatted_body,omitempty"`
+	Attachment    *attachmentDTO `json:"attachment,omitempty"`
+	Location      *locationDTO   `json:"location,omitempty"`
+	ReplyTo       string         `json:"reply_to,omitempty"`
+	ThreadRoot    string         `json:"thread_root,omitempty"`
+	SentAt        time.Time      `json:"sent_at"`
+	EditedAt      *time.Time     `json:"edited_at,omitempty"`
+	Deleted       *deletionDTO   `json:"deleted,omitempty"`
+}
+
+type attachmentDTO struct {
+	Name       string `json:"name,omitempty"`
+	MIMEType   string `json:"mime_type,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	Voice      bool   `json:"voice,omitempty"`
+	// URL downloads the file with the same credentials as the API; absent when the file cannot be served.
+	URL string `json:"url,omitempty"`
+}
+
+type locationDTO struct {
+	GeoURI string `json:"geo_uri"`
+	MapURL string `json:"map_url,omitempty"`
 }
 
 type deletionDTO struct {
@@ -84,7 +106,7 @@ func (h *handler) listMessages(w http.ResponseWriter, r *http.Request, who princ
 
 	body := messagesDTO{Messages: make([]messageDTO, len(messages))}
 	for i, msg := range messages {
-		body.Messages[i] = toMessageDTO(msg)
+		body.Messages[i] = h.toMessageDTO(msg)
 	}
 	if len(messages) > 0 {
 		body.NextBefore = domain.NewCursor(messages[len(messages)-1]).String()
@@ -133,10 +155,23 @@ func parseQuery(r *http.Request) (domain.MessageQuery, error) {
 	return query, nil
 }
 
-func toMessageDTO(msg domain.Message) messageDTO {
+func (h *handler) toMessageDTO(msg domain.Message) messageDTO {
 	dto := messageDTO{
 		Seq: msg.Seq, EventID: msg.EventID, RoomID: msg.RoomID, Sender: msg.Sender, SenderName: msg.SenderName,
-		Kind: string(msg.Kind), Body: msg.Body, MediaURL: msg.MediaURL, SentAt: msg.SentAt, EditedAt: msg.EditedAt,
+		Kind: string(msg.Kind), Body: msg.Body, FormattedBody: msg.Formatted, ReplyTo: msg.ReplyTo, ThreadRoot: msg.ThreadRoot,
+		SentAt: msg.SentAt, EditedAt: msg.EditedAt,
+	}
+	if a := msg.Attachment; a != nil {
+		dto.Attachment = &attachmentDTO{
+			Name: a.Name, MIMEType: a.MIMEType, Size: a.Size, Width: a.Width, Height: a.Height,
+			DurationMS: a.Duration.Milliseconds(), Voice: a.Voice,
+		}
+		if h.Media.Serves(a) {
+			dto.Attachment.URL = h.apiMediaURL(msg)
+		}
+	}
+	if msg.Location != "" {
+		dto.Location = &locationDTO{GeoURI: msg.Location, MapURL: mapURL(msg.Location)}
 	}
 	if msg.Deletion != nil {
 		dto.Deleted = &deletionDTO{At: msg.Deletion.At, By: msg.Deletion.By, Reason: msg.Deletion.Reason}

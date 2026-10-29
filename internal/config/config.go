@@ -22,6 +22,9 @@ type Config struct {
 	// KeepDeleted keeps the text of messages that were deleted in the room; otherwise only who deleted
 	// them and when is kept.
 	KeepDeleted bool `env:"MESSAGE_KEEP_DELETED" envDefault:"false"`
+	// MediaMaxSize is the largest attachment, in bytes, that the bot downloads for readers; 0 turns the
+	// download endpoints off. Files are fetched from the homeserver on request and not stored.
+	MediaMaxSize int64 `env:"MEDIA_MAX_SIZE" envDefault:"52428800"`
 	// Backfill lets the API fetch missing older messages from the homeserver.
 	Backfill bool   `env:"HISTORY_BACKFILL" envDefault:"true"`
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
@@ -76,6 +79,9 @@ func (c Config) validate() error {
 	}
 	if c.Matrix.RoomAdminLevel < 0 {
 		errs = append(errs, errors.New("MATRIX_ROOM_ADMIN_LEVEL must not be negative"))
+	}
+	if c.MediaMaxSize < 0 {
+		errs = append(errs, errors.New("MEDIA_MAX_SIZE must not be negative"))
 	}
 	if c.Retention < 0 {
 		errs = append(errs, errors.New("MESSAGE_RETENTION must not be negative"))

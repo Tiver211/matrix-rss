@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
@@ -69,7 +70,7 @@ func newTestBot(t *testing.T, homeserver *fakeHomeserver, level int) *Bot {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Bot{client: client, log: zerolog.Nop(), roomAdminLevel: level}
+	return &Bot{client: client, log: zerolog.Nop(), roomAdminLevel: level, now: time.Now}
 }
 
 func TestIsRoomAdmin(t *testing.T) {
@@ -214,5 +215,30 @@ func TestWhoseInvitationsTheBotAccepts(t *testing.T) {
 	bot.feedList = fakeFeedList{} // nothing is published, so there is nothing to administer
 	if invite("@roomadmin:hs", true) {
 		t.Error("with no published rooms nobody is a room admin")
+	}
+}
+
+func TestOldCommandsAreNotCarriedOut(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	bot := newTestBot(t, &fakeHomeserver{}, 100)
+	bot.now = func() time.Time { return now }
+
+	at := func(age time.Duration) *event.Event {
+		return &event.Event{Timestamp: now.Add(-age).UnixMilli()}
+	}
+	for name, tc := range map[string]struct {
+		age  time.Duration
+		want bool
+	}{
+		"just sent":                {0, false},
+		"a minute ago":             {time.Minute, false},
+		"just inside the limit":    {commandMaxAge - time.Second, false},
+		"just outside the limit":   {commandMaxAge + time.Second, true},
+		"yesterday":                {24 * time.Hour, true},
+		"slightly from the future": {-10 * time.Second, false}, // clock differences between servers
+	} {
+		if got := bot.isStale(at(tc.age)); got != tc.want {
+			t.Errorf("%s: got %v, want %v", name, got, tc.want)
+		}
 	}
 }

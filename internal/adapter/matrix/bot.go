@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
@@ -22,7 +23,13 @@ type Bot struct {
 
 	roomAdminLevel int
 	feedList       FeedLister
+	now            func() time.Time
 }
+
+// commandMaxAge is how old a command may be and still be carried out. A bot that starts without its
+// sync position, or after a long pause, is handed the recent history of its rooms; the commands in
+// it were meant for another moment and must not run again.
+const commandMaxAge = 5 * time.Minute
 
 // Config groups the bot's collaborators and settings.
 // Admins may invite the bot and manage feeds; FeedURL builds the feed links the bot posts.
@@ -48,7 +55,7 @@ func New(ctx context.Context, cfg Config) (*Bot, error) {
 	if err != nil {
 		return nil, err
 	}
-	bot := &Bot{client: client, recorder: cfg.Recorder, log: cfg.Log, roomAdminLevel: cfg.RoomAdminLevel, feedList: cfg.FeedList}
+	bot := &Bot{client: client, recorder: cfg.Recorder, log: cfg.Log, roomAdminLevel: cfg.RoomAdminLevel, feedList: cfg.FeedList, now: time.Now}
 	bot.commands = NewCommands(cfg.CommandPrefix, cfg.Admins, CommandDeps{
 		Feeds: cfg.Feeds, Access: cfg.Access, Rooms: bot, Chats: bot, Authority: bot, FeedURL: cfg.FeedURL,
 	})
@@ -58,6 +65,10 @@ func New(ctx context.Context, cfg Config) (*Bot, error) {
 		return nil, errors.New("unexpected syncer type")
 	}
 	syncer.OnEventType(event.EventMessage, bot.onMessage)
+	syncer.OnEventType(event.EventSticker, bot.onMessage)
+	for _, pollStart := range pollStartTypes {
+		syncer.OnEventType(pollStart, bot.onMessage)
+	}
 	syncer.OnEventType(event.EventRedaction, bot.onRedaction)
 	syncer.OnEventType(event.StateMember, bot.onMember)
 	return bot, nil
@@ -129,6 +140,11 @@ func (b *Bot) IsRoomAdmin(ctx context.Context, roomID, userID string) bool {
 	return joined
 }
 
+// isStale reports whether the event is too old for a command in it to be carried out.
+func (b *Bot) isStale(evt *event.Event) bool {
+	return b.now().Sub(toTime(evt.Timestamp)) > commandMaxAge
+}
+
 // isBotTraffic reports whether the event is the bot talking or being talked to: its own replies, which
 // can contain secrets, and the commands people send it. Neither belongs in a feed.
 func (b *Bot) isBotTraffic(evt *event.Event) bool {
@@ -146,6 +162,10 @@ func (b *Bot) onMessage(ctx context.Context, evt *event.Event) {
 	log := b.log.With().Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Logger()
 
 	if content := evt.Content.AsMessage(); content != nil {
+		if b.commands.IsCommand(content.Body) && b.isStale(evt) {
+			log.Warn().Stringer("sender", evt.Sender).Msg("ignoring an old command")
+			return
+		}
 		if reply, isCommand := b.commands.Handle(ctx, evt.RoomID.String(), evt.Sender.String(), content.Body); isCommand {
 			b.reply(ctx, evt.RoomID, reply, log)
 			return
@@ -158,7 +178,7 @@ func (b *Bot) onMessage(ctx context.Context, evt *event.Event) {
 		}
 		return
 	}
-	msg, ok := toMessage(evt, b.displayName(ctx, evt), b.mediaURL)
+	msg, ok := toMessage(evt, b.displayName(ctx, evt))
 	if !ok {
 		return
 	}
@@ -235,13 +255,4 @@ func (b *Bot) displayName(ctx context.Context, evt *event.Event) string {
 		return evt.Sender.String()
 	}
 	return member.Displayname
-}
-
-// mediaURL returns a download link for unencrypted attachments and an empty string otherwise.
-func (b *Bot) mediaURL(content event.MessageEventContent) string {
-	uri, err := content.URL.Parse()
-	if err != nil || uri.IsEmpty() {
-		return ""
-	}
-	return b.client.BuildURL(mautrix.MediaURLPath{"v3", "download", uri.Homeserver, uri.FileID})
 }

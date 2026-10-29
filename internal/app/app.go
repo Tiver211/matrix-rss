@@ -69,7 +69,9 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger, matrixLog zer
 	}
 	history := usecase.NewHistoryService(store.Feeds(), store.Messages(), messages, source, log)
 
-	handler := httpapi.New(httpapi.Deps{Feeds: feeds, History: history, Messages: messages, Access: access}, httpapi.Config{
+	media := usecase.NewMediaService(store.Messages(), bot.Media(), cfg.MediaMaxSize)
+
+	handler := httpapi.New(httpapi.Deps{Feeds: feeds, History: history, Messages: messages, Media: media, Access: access}, httpapi.Config{
 		RootToken:     cfg.HTTP.APIToken,
 		PublicBaseURL: cfg.HTTP.PublicBaseURL,
 	}, log)

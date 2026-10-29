@@ -3,6 +3,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,15 +30,34 @@ const (
 type server struct {
 	t       *testing.T
 	handler http.Handler
-	// feedSecret opens the feed of the main room.
-	feedSecret string
+	// feedSecret opens the feed of the main room, mediaSecret the feed of the room with attachments.
+	feedSecret, mediaSecret string
 }
+
+// fakeFiles serves the content behind attachment references.
+type fakeFiles map[string][]byte
+
+func (f fakeFiles) Fetch(_ context.Context, ref string, _ int64) ([]byte, error) {
+	if data, ok := f[ref]; ok {
+		return data, nil
+	}
+	return nil, domain.ErrMediaUnavailable
+}
+
+const mediaRoom = "!media:hs"
+
+var pngBytes = []byte("\x89PNG fake image bytes 0123456789")
 
 func minute(n int) time.Time { return time.Date(2026, 1, 1, 10, n, 0, 0, time.UTC) }
 
 // newServer wires the real use cases and a SQLite database behind the HTTP handler.
 // The main room has three messages: "hello <b>world</b>\nsecond line" (edited), "fine" and a deleted one.
 func newServer(t *testing.T) *server {
+	t.Helper()
+	return newServerWithMedia(t, 1<<20)
+}
+
+func newServerWithMedia(t *testing.T, mediaMax int64) *server {
 	t.Helper()
 	store, err := gormstore.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -52,7 +72,7 @@ func newServer(t *testing.T) *server {
 	history := usecase.NewHistoryService(store.Feeds(), store.Messages(), messages, nil, log)
 
 	ctx := t.Context()
-	for _, room := range []string{roomID, otherRoom} {
+	for _, room := range []string{roomID, otherRoom, mediaRoom} {
 		if _, err := feeds.Enable(ctx, room, "Room "+room); err != nil {
 			t.Fatal(err)
 		}
@@ -79,9 +99,47 @@ func newServer(t *testing.T) *server {
 		t.Fatal(err)
 	}
 
-	handler := New(Deps{Feeds: feeds, History: history, Messages: messages, Access: access},
+	_, mediaSecret, err := access.IssueFeedToken(ctx, mediaRoom, "media", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedMediaRoom(t, messages)
+	files := fakeFiles{"ref-png": pngBytes, "ref-svg": []byte("<svg onload=alert(1)/>"), "ref-voice": []byte("OggS voice"), "ref-big": []byte("big")}
+	media := usecase.NewMediaService(store.Messages(), files, mediaMax)
+
+	handler := New(Deps{Feeds: feeds, History: history, Messages: messages, Media: media, Access: access},
 		Config{RootToken: rootToken, PublicBaseURL: "https://rss.example.org/"}, log)
-	return &server{t: t, handler: handler, feedSecret: secret}
+	return &server{t: t, handler: handler, feedSecret: secret, mediaSecret: mediaSecret}
+}
+
+func seedMediaRoom(t *testing.T, messages *usecase.MessageService) {
+	t.Helper()
+	for _, msg := range []domain.Message{
+		{EventID: "$png", Kind: domain.KindImage, Body: "cat.png", SentAt: minute(1),
+			Attachment: &domain.Attachment{Name: "cat.png", MIMEType: "image/png", Size: int64(len(pngBytes)), Width: 640, Height: 480, Ref: "ref-png"}},
+		{EventID: "$svg", Kind: domain.KindFile, Body: "logo.svg", SentAt: minute(2),
+			Attachment: &domain.Attachment{Name: "logo.svg", MIMEType: "image/svg+xml", Ref: "ref-svg"}},
+		{EventID: "$voice", Kind: domain.KindAudio, Body: "Voice message", SentAt: minute(3),
+			Attachment: &domain.Attachment{Name: "voice.ogg", MIMEType: "audio/ogg", Size: 10, Duration: 12340 * time.Millisecond, Voice: true, Ref: "ref-voice"}},
+		{EventID: "$big", Kind: domain.KindVideo, Body: "huge.mp4", SentAt: minute(4),
+			Attachment: &domain.Attachment{Name: "huge.mp4", MIMEType: "video/mp4", Size: 1 << 30, Ref: "ref-big"}},
+		{EventID: "$lost", Kind: domain.KindImage, Body: "lost.png", SentAt: minute(5),
+			Attachment: &domain.Attachment{Name: "lost.png", MIMEType: "image/png", Ref: "ref-missing"}},
+		{EventID: "$place", Kind: domain.KindLocation, Body: "Berlin", Location: "geo:52.52,13.40;u=30", SentAt: minute(6)},
+		{EventID: "$rich", Kind: domain.KindText, Body: "bold and link", Formatted: `<b>bold</b> and <a href="https://example.org" rel="nofollow">link</a>`,
+			ReplyTo: "$png", ThreadRoot: "$svg", SentAt: minute(7)},
+		{EventID: "$poll", Kind: domain.KindPoll, Body: "Lunch?\n1. Pizza\n2. Sushi", SentAt: minute(8)},
+		{EventID: "$gone", Kind: domain.KindImage, Body: "gone.png", SentAt: minute(9),
+			Attachment: &domain.Attachment{Name: "gone.png", MIMEType: "image/png", Ref: "ref-png"}},
+	} {
+		msg.RoomID, msg.Sender, msg.SenderName = mediaRoom, "@alice:hs", "Alice"
+		if err := messages.Record(context.Background(), msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := messages.Delete(context.Background(), mediaRoom, "$gone", domain.Deletion{At: minute(10), By: "@mod:hs"}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (s *server) do(method, path, bearer, body string) *httptest.ResponseRecorder {
@@ -136,7 +194,7 @@ func TestListRoomsAndMessages(t *testing.T) {
 	s := newServer(t)
 
 	rooms := decode[struct{ Rooms []roomDTO }](t, s.get("/api/v1/rooms", rootToken), http.StatusOK)
-	if len(rooms.Rooms) != 2 {
+	if len(rooms.Rooms) != 3 {
 		t.Fatalf("unexpected rooms: %+v", rooms)
 	}
 
@@ -356,5 +414,192 @@ func TestFeedSupportsConditionalRequests(t *testing.T) {
 func TestHealth(t *testing.T) {
 	if rec := newServer(t).get("/healthz", ""); rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
+	}
+}
+
+func mediaPath(room, event string) string {
+	return messagesPath(room) + "/" + event + "/media"
+}
+
+func TestAPIDescribesEveryKindOfMessage(t *testing.T) {
+	s := newServer(t)
+	page := decode[messagesDTO](t, s.get(messagesPath(mediaRoom)+"?limit=50", rootToken), http.StatusOK)
+	byID := map[string]messageDTO{}
+	for _, m := range page.Messages {
+		byID[m.EventID] = m
+	}
+	if len(byID) != 8 {
+		t.Fatalf("8 messages expected without the deleted one, got %d", len(byID))
+	}
+
+	png := byID["$png"].Attachment
+	if big := byID["$big"].Attachment; big == nil || big.URL != "" {
+		t.Fatalf("a file above the limit is described but not offered: %+v", big)
+	}
+	if png == nil || png.Name != "cat.png" || png.MIMEType != "image/png" || png.Width != 640 || png.Height != 480 || png.Voice {
+		t.Fatalf("image: %+v", png)
+	}
+	wantURL := "https://rss.example.org/api/v1/rooms/%21media:hs/messages/$png/media"
+	if png.URL != wantURL {
+		t.Fatalf("the download URL: got %q, want %q", png.URL, wantURL)
+	}
+	if voice := byID["$voice"].Attachment; voice == nil || !voice.Voice || voice.DurationMS != 12340 {
+		t.Fatalf("voice message: %+v", voice)
+	}
+	if place := byID["$place"].Location; place == nil || place.GeoURI != "geo:52.52,13.40;u=30" ||
+		place.MapURL != "https://www.openstreetmap.org/?mlat=52.52&mlon=13.40#map=16/52.52/13.40" {
+		t.Fatalf("location: %+v", place)
+	}
+	rich := byID["$rich"]
+	if rich.FormattedBody == "" || rich.ReplyTo != "$png" || rich.ThreadRoot != "$svg" {
+		t.Fatalf("formatted, reply and thread: %+v", rich)
+	}
+	if byID["$poll"].Kind != "poll" || byID["$place"].Kind != "location" {
+		t.Fatalf("kinds: %+v / %+v", byID["$poll"], byID["$place"])
+	}
+}
+
+func TestServingAnAttachment(t *testing.T) {
+	s := newServer(t)
+	rec := s.get(mediaPath(mediaRoom, "$png"), rootToken)
+	if rec.Code != http.StatusOK || rec.Body.String() != string(pngBytes) {
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body)
+	}
+	header := rec.Header()
+	for name, want := range map[string]string{
+		"Content-Type":            "image/png",
+		"X-Content-Type-Options":  "nosniff",
+		"Content-Security-Policy": "sandbox; default-src 'none'",
+	} {
+		if got := header.Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if d := header.Get("Content-Disposition"); !strings.HasPrefix(d, "inline") || !strings.Contains(d, "cat.png") {
+		t.Errorf("a picture is shown in place: %q", d)
+	}
+	if header.Get("ETag") == "" || header.Get("Cache-Control") == "" {
+		t.Errorf("missing cache headers: %v", header)
+	}
+
+	// Players ask for parts of audio and video.
+	req := httptest.NewRequest(http.MethodGet, mediaPath(mediaRoom, "$png"), nil)
+	req.Header.Set("Authorization", "Bearer "+rootToken)
+	req.Header.Set("Range", "bytes=1-3")
+	partial := httptest.NewRecorder()
+	s.handler.ServeHTTP(partial, req)
+	if partial.Code != http.StatusPartialContent || partial.Body.String() != string(pngBytes[1:4]) {
+		t.Fatalf("range: status %d, body %q", partial.Code, partial.Body)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, mediaPath(mediaRoom, "$png"), nil)
+	req.Header.Set("Authorization", "Bearer "+rootToken)
+	req.Header.Set("If-None-Match", header.Get("ETag"))
+	cached := httptest.NewRecorder()
+	s.handler.ServeHTTP(cached, req)
+	if cached.Code != http.StatusNotModified {
+		t.Fatalf("a repeated request with the ETag must give 304, got %d", cached.Code)
+	}
+}
+
+func TestDangerousFilesAreNeverShownInPlace(t *testing.T) {
+	s := newServer(t)
+	rec := s.get(mediaPath(mediaRoom, "$svg"), rootToken)
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("SVG can carry scripts and must be a download: %d %q", rec.Code, rec.Header().Get("Content-Disposition"))
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "sandbox") {
+		t.Fatal("the sandbox policy is always sent")
+	}
+	if voice := s.get(mediaPath(mediaRoom, "$voice"), rootToken); !strings.HasPrefix(voice.Header().Get("Content-Disposition"), "inline") {
+		t.Errorf("audio is played in place: %q", voice.Header().Get("Content-Disposition"))
+	}
+}
+
+func TestMediaErrors(t *testing.T) {
+	s := newServer(t)
+	for path, want := range map[string]int{
+		mediaPath(mediaRoom, "$big"):     http.StatusRequestEntityTooLarge,
+		mediaPath(mediaRoom, "$lost"):    http.StatusNotFound, // the homeserver no longer has it
+		mediaPath(mediaRoom, "$gone"):    http.StatusNotFound, // deleted
+		mediaPath(mediaRoom, "$place"):   http.StatusNotFound, // no file at all
+		mediaPath(mediaRoom, "$unknown"): http.StatusNotFound,
+		mediaPath(roomID, "$png"):        http.StatusNotFound, // a message of another room
+	} {
+		if rec := s.get(path, rootToken); rec.Code != want {
+			t.Errorf("%s: status %d, want %d", path, rec.Code, want)
+		}
+	}
+	if rec := s.get(mediaPath(mediaRoom, "$png"), ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("files need credentials, got %d", rec.Code)
+	}
+}
+
+func TestAPIKeysSeeOnlyTheFilesOfTheirRooms(t *testing.T) {
+	s := newServer(t)
+	created := decode[keyDTO](t, s.do(http.MethodPost, "/api/v1/admin/keys", rootToken, fmt.Sprintf(`{"name":"k","rooms":[%q]}`, roomID)), http.StatusCreated)
+
+	if rec := s.get(mediaPath(mediaRoom, "$png"), created.Secret); rec.Code != http.StatusForbidden {
+		t.Fatalf("a file of another room: status %d, want 403", rec.Code)
+	}
+	wide := decode[keyDTO](t, s.do(http.MethodPost, "/api/v1/admin/keys", rootToken, fmt.Sprintf(`{"name":"w","rooms":[%q]}`, mediaRoom)), http.StatusCreated)
+	if rec := s.get(mediaPath(mediaRoom, "$png"), wide.Secret); rec.Code != http.StatusOK {
+		t.Fatalf("its own room: status %d", rec.Code)
+	}
+}
+
+func TestMediaCanBeTurnedOff(t *testing.T) {
+	s := newServerWithMedia(t, 0)
+	if rec := s.get(mediaPath(mediaRoom, "$png"), rootToken); rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404", rec.Code)
+	}
+	page := decode[messagesDTO](t, s.get(messagesPath(mediaRoom), rootToken), http.StatusOK)
+	for _, m := range page.Messages {
+		if m.Attachment != nil && m.Attachment.URL != "" {
+			t.Fatalf("no download URLs when serving is off: %+v", m.Attachment)
+		}
+	}
+	feed := s.get("/feeds/"+s.mediaSecret, "").Body.String()
+	if strings.Contains(feed, "<enclosure") {
+		t.Fatalf("no enclosures when serving is off:\n%s", feed)
+	}
+}
+
+func TestFeedWithEveryKindOfMessage(t *testing.T) {
+	s := newServer(t)
+	feed := s.get("/feeds/"+s.mediaSecret+"?limit=50", "").Body.String()
+
+	mediaURL := "https://rss.example.org/feeds/" + s.mediaSecret + "/media/"
+	for _, want := range []string{
+		"<title>Alice: [image] cat.png</title>", "[voice message] Voice message", "[location] Berlin", "[poll] Lunch?",
+		`<enclosure url="` + mediaURL + `$png"`, `type="image/png"`, `length="` + fmt.Sprint(len(pngBytes)) + `"`,
+		"https://www.openstreetmap.org/?mlat=52.52", "<b>bold</b>",
+	} {
+		if !strings.Contains(feed, want) {
+			t.Errorf("%q missing from the feed:\n%s", want, feed)
+		}
+	}
+	if strings.Contains(feed, "media/$big") {
+		t.Error("a file above the limit must not be offered to readers")
+	}
+	if strings.Contains(feed, "gone.png") {
+		t.Error("a deleted message must not be in the feed")
+	}
+}
+
+func TestFeedReadersDownloadWithTheirToken(t *testing.T) {
+	s := newServer(t)
+	rec := s.get("/feeds/"+s.mediaSecret+"/media/$png", "")
+	if rec.Code != http.StatusOK || rec.Body.String() != string(pngBytes) {
+		t.Fatalf("status %d, body %q", rec.Code, rec.Body)
+	}
+	if rec := s.get("/feeds/"+s.feedSecret+"/media/$png", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("a token of another room must not reach this room's files, got %d", rec.Code)
+	}
+	if rec := s.get("/feeds/wrong-token/media/$png", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown token: %d", rec.Code)
+	}
+	if rec := s.get("/feeds/"+s.mediaSecret+"/media/$gone", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("deleted message: %d", rec.Code)
 	}
 }
